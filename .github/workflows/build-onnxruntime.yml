@@ -1,0 +1,131 @@
+name: Build ONNX Runtime
+
+on:
+  workflow_dispatch:
+    inputs:
+      python_version:
+        description: 'Python version to use'
+        required: false
+        default: '3.13'
+        type: choice
+        options:
+          - '3.9'
+          - '3.10'
+          - '3.11'
+          - '3.12'
+          - '3.13'
+      build_config:
+        description: 'Build configuration'
+        required: false
+        default: 'RelWithDebInfo'
+        type: choice
+        options:
+          - 'Debug'
+          - 'Release'
+          - 'RelWithDebInfo'
+      enable_debug_node_inputs_outputs:
+        description: 'Enable DEBUG_NODE_INPUTS_OUTPUTS'
+        required: false
+        default: true
+        type: boolean
+
+jobs:
+  build:
+    runs-on: macos-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        submodules: recursive
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ github.event.inputs.python_version || '3.13' }}
+
+    - name: Install system dependencies
+      run: |
+        # Install Homebrew if not already installed
+        if ! command -v brew &> /dev/null; then
+          /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+        fi
+
+        # Install CMake
+        brew install cmake
+
+        # Install other dependencies
+        brew install protobuf
+
+    - name: Install Python dependencies
+      run: |
+        python -m pip install --upgrade pip setuptools wheel
+        pip install numpy pybind11
+
+    - name: Configure build
+      run: |
+        # Clean any existing build
+        rm -rf build/
+
+        # Run CMake configuration
+        ./build.sh --config ${{ github.event.inputs.build_config || 'RelWithDebInfo' }} --update --cmake_extra_defines onnxruntime_DEBUG_NODE_INPUTS_OUTPUTS=${{ github.event.inputs.enable_debug_node_inputs_outputs || '1' }}
+
+    - name: Build ONNX Runtime
+      run: |
+        # Build the project
+        ./build.sh --config ${{ github.event.inputs.build_config || 'RelWithDebInfo' }} --build --build_wheel --parallel --skip_tests --cmake_extra_defines onnxruntime_DEBUG_NODE_INPUTS_OUTPUTS=${{ github.event.inputs.enable_debug_node_inputs_outputs || '1' }}
+
+    - name: Verify wheel
+      run: |
+        # Check the wheel was created
+        ls -la dist/
+
+        # Verify Python version in wheel name
+        python -c "
+        import os
+        import glob
+        wheels = glob.glob('dist/*.whl')
+        if wheels:
+            wheel_name = os.path.basename(wheels[0])
+            print(f'Built wheel: {wheel_name}')
+
+            # Extract Python version from wheel name
+            import re
+            match = re.search(r'cp(\d+)-cp(\d+)', wheel_name)
+            if match:
+                python_version = f'{match.group(1)[0]}.{match.group(1)[1:]}'
+                print(f'Wheel built for Python: {python_version}')
+            else:
+                print('Could not determine Python version from wheel name')
+        else:
+            print('No wheel found!')
+            exit(1)
+        "
+
+    - name: Upload wheel artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: onnxruntime-wheel-python${{ github.event.inputs.python_version || '3.13' }}
+        path: dist/*.whl
+        retention-days: 30
+
+    - name: Test wheel installation
+      run: |
+        # Test installing the wheel
+        pip install dist/*.whl --force-reinstall
+
+        # Test basic functionality
+        python -c "
+        import onnxruntime as ort
+        print(f'ONNX Runtime version: {ort.__version__}')
+        print(f'Available providers: {ort.get_available_providers()}')
+        print(f'Device: {ort.get_device()}')
+        "
+
+    - name: Create release (optional)
+      if: github.event_name == 'workflow_dispatch'
+      run: |
+        # This step can be used to create a GitHub release with the wheel
+        echo "Wheel built successfully and ready for distribution"
+        echo "Wheel location: dist/"
+        echo "To create a release, you can manually upload the wheel or use GitHub CLI"
